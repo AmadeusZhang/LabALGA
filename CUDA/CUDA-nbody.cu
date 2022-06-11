@@ -18,26 +18,34 @@ typedef struct { float x, y, z, vx, vy, vz; } Body;
  * on all others.
  */
 
-__global__ void bodyForce( Body * p, float dt, int n ) {
+__global__ void bodyForce(Body *p, float dt, int n) {
+    
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
+    
+    /* IMPORTANT:
+     * for first refactors, the logic of the application (the bodyForce function ) should remain largely unchanged 
+     * focus on accelerating it
+     */
+    
+  for ( int i = tid; i < n; i+= stride ) {
+    float Fx = 0.0f; float Fy = 0.0f; float Fz = 0.0f;
 
-    for ( int i = tid; i < n; i += stride ) {
-        float Fx = 0.0f, Fy = 0.0f, Fz = 0.0f;
-        for ( int j = tid; j < n; j += stride ) {
-            float dx = p[j].x - p[i].x;
-            float dy = p[j].y - p[i].y;
-            float dz = p[j].z - p[i].z;
-            float distSqr = dx*dx + dy*dy + dz*dz + SOFTENING;
-            float invDist = rsqrtf(distSqr);
-            float invDist3 = invDist * invDist * invDist;
+    for (int j = 0; j < n; j++ ) {
+      float dx = p[j].x - p[i].x;
+      float dy = p[j].y - p[i].y;
+      float dz = p[j].z - p[i].z;
+      float distSqr = dx*dx + dy*dy + dz*dz + SOFTENING;
+      float invDist = rsqrtf(distSqr);
+      float invDist3 = invDist * invDist * invDist;
 
-            Fx += dx * invDist3; Fy += dy * invDist3; Fz += dz * invDist3;
-        }
-        
-        p[i].vx += dt*Fx; p[i].vy += dt*Fy; p[i].vz += dt*Fz;
+      Fx += dx * invDist3; Fy += dy * invDist3; Fz += dz * invDist3;
     }
+
+    p[i].vx += dt*Fx; p[i].vy += dt*Fy; p[i].vz += dt*Fz;
+  }
 }
+
 
 int main(const int argc, const char** argv) {
 
@@ -71,7 +79,7 @@ int main(const int argc, const char** argv) {
   cudaMallocManaged( &buf, bytes );
 
   Body *p = (Body*)buf;
-
+    
   read_values_from_file(initialized_values, buf, bytes);
 
   double totalTime = 0.0;
@@ -85,6 +93,8 @@ int main(const int argc, const char** argv) {
   
   int threadsPerBlock = 256;
   int blocksPerSM = 32 * numSMs;
+    
+  cudaStream_t streams[ nIters ];
 
   /*
    * This simulation will run for 10 cycles of time, calculating gravitational
@@ -98,13 +108,17 @@ int main(const int argc, const char** argv) {
    * You will likely wish to refactor the work being done in `bodyForce`,
    * and potentially the work to integrate the positions.
    */
+    
+    cudaStreamCreate( &streams[iter] );
 
-    bodyForce <<< blocksPerSM, threadsPerBlock >>> (p, dt, nBodies); // compute interbody forces
+    bodyForce <<< blocksPerSM, threadsPerBlock, 0, streams[iter] >>> (p, dt, nBodies); // compute interbody forces
 
   /*
    * This position integration cannot occur until this round of `bodyForce` has completed.
    * Also, the next round of `bodyForce` cannot begin until the integration is complete.
    */
+      
+    cudaStreamSynchronize( streams[iter] );
 
     for (int i = 0 ; i < nBodies; i++) { // integrate position
       p[i].x += p[i].vx*dt;
@@ -115,6 +129,8 @@ int main(const int argc, const char** argv) {
     const double tElapsed = GetTimer() / 1000.0;
     totalTime += tElapsed;
   }
+    
+  cudaDeviceSynchronize();
 
   double avgTime = totalTime / (double)(nIters);
   float billionsOfOpsPerSecond = 1e-9 * nBodies * nBodies / avgTime;
